@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>🎋 接粽子大作战</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: linear-gradient(180deg, #1a0a00 0%, #2d1810 40%, #4a2c1a 100%);
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #gameWrap {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+  }
+  canvas { display: block; }
+
+  /* ===== 浮层通用 ===== */
+  .overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: rgba(20,8,0,0.82);
+    z-index: 10;
+    transition: opacity 0.3s;
+  }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .overlay h1 {
+    font-size: 28px; color: #ffe08a;
+    text-shadow: 0 2px 12px rgba(255,180,60,0.4);
+    margin-bottom: 6px;
+  }
+  .overlay .sub { font-size: 14px; color: #cba86e; margin-bottom: 24px; }
+  .overlay .btn {
+    padding: 14px 48px;
+    background: linear-gradient(135deg, #d4380d 0%, #e85d22 100%);
+    color: #fff; font-size: 18px; font-weight: 600;
+    border: none; border-radius: 40px;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(228,88,30,0.45);
+    letter-spacing: 2px;
+  }
+  .overlay .btn:active { transform: scale(0.96); }
+
+  /* HUD */
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px;
+    pointer-events: none; z-index: 5;
+  }
+  .hud-item {
+    background: rgba(0,0,0,0.45);
+    backdrop-filter: blur(6px);
+    padding: 6px 14px; border-radius: 20px;
+    color: #ffe08a; font-size: 14px; font-weight: 600;
+  }
+
+  /* 结算表单 */
+  #resultPanel input {
+    width: 220px; padding: 10px 14px;
+    margin: 6px 0; border-radius: 10px;
+    border: 1.5px solid #a0713a;
+    background: rgba(60,30,10,0.7);
+    color: #ffecc8; font-size: 15px;
+    outline: none; text-align: center;
+  }
+  #resultPanel input::placeholder { color: #8a6840; }
+  #resultPanel .score-big {
+    font-size: 52px; color: #ffe08a; font-weight: 800;
+    text-shadow: 0 0 24px rgba(255,200,60,0.5);
+    margin: 8px 0 4px;
+  }
+  #resultPanel .label { color: #cba86e; font-size: 13px; margin-top: 12px; }
+  #submitMsg { font-size: 13px; margin-top: 10px; min-height: 20px; }
+  .success { color: #52c41a !important; }
+  .error   { color: #ff4d4f !important; }
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <canvas id="cv"></canvas>
+
+  <!-- HUD -->
+  <div id="hud" style="display:none">
+    <div class="hud-item" id="hudTimer">⏱ 30s</div>
+    <div class="hud-item" id="hudScore">🎋 × 0</div>
+  </div>
+
+  <!-- 开始页 -->
+  <div class="overlay" id="startPanel">
+    <h1>🎋 接粽子大作战</h1>
+    <p class="sub">限时 30 秒 · 拖动篮子接住掉落的粽子</p>
+    <button class="btn" onclick="startGame()">开始挑战</button>
+  </div>
+
+  <!-- 结束页 -->
+  <div class="overlay hidden" id="endPanel">
+    <div id="resultPanel">
+      <p class="sub">⏱ 时间到！</p>
+      <div class="score-big" id="finalScore">0</div>
+      <p class="sub" style="margin-bottom:2px">个粽子</p>
+      <div class="label">留个名儿，领奖去～</div>
+      <input id="inpName"  placeholder="你的姓名 / 昵称" maxlength="20" autocomplete="off"><br>
+      <input id="inpEmp"   placeholder="工号（选填）" maxlength="20" autocomplete="off"><br>
+      <button class="btn" style="margin-top:14px" onclick="submitScore()">提交成绩</button>
+      <div id="submitMsg"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   接粽子大作战 — 纯前端单文件版
+   适配手机触摸 + 桌面鼠标
+   提交接口：你只需要改 CONFIG 里的 submitUrl
+   ============================================================ */
+const CONFIG = {
+  duration: 30,            // 游戏时长（秒）
+  dropInterval: 650,       // 粽子生成间隔 ms（越小越密）
+  fallSpeedBase: 2.8,      // 基础下落速度 px/帧
+  speedUpOverTime: true,   // 随时间加速
+  basketWidthRatio: 0.22,  // 篮子宽度占屏比例
+  basketHeight: 54,
+  submitUrl: '',           // ← 改成你的代理接口地址（见下文），空则只 console.log
+};
+
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const wrap = document.getElementById('gameWrap');
+
+let W, H, SCALE;
+let running = false, timerVal, score, drops = [], lastSpawn, rafId;
+let basket = { x: 0, w: 0, h: CONFIG.basketHeight };
+let fingerX = null; // 触摸/鼠标跟随
+
+/* ---------- 尺寸 ---------- */
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  cv.width  = W * dpr;
+  cv.height = H * dpr;
+  cv.style.width  = W + 'px';
+  cv.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  basket.w = W * CONFIG.basketWidthRatio;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------- 粽子对象 ---------- */
+function spawnDrop() {
+  const size = 32 + Math.random() * 10;
+  const rng  = Math.random();
+  // 10% 概率出"坏粽"（减分）
+  const isBad = rng < 0.10;
+  drops.push({
+    x: size + Math.random() * (W - size * 2),
+    y: -size,
+    size,
+    speed: CONFIG.fallSpeedBase + Math.random() * 1.4 + (CONFIG.speedUpOverTime ? (30 - timerVal) * 0.06 : 0),
+    rot: Math.random() * Math.PI * 2,
+    rotSpd: (Math.random() - 0.5) * 0.06,
+    isBad,
+    caught: false,
+  });
+}
+
+/* ---------- 绘制 ---------- */
+function drawBG() {
+  // 渐变天空
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1a0800');
+  g.addColorStop(0.55, '#3b1f0f');
+  g.addColorStop(1, '#5a3020');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // 星星点缀
+  if (!drawBG._stars) {
+    drawBG._stars = Array.from({length: 40}, () => ({
+      x: Math.random() * 1000, y: Math.random() * 500,
+      r: 0.5 + Math.random() * 1.2, a: 0.3 + Math.random() * 0.5
+    }));
+  }
+  drawBG._stars.forEach(s => {
+    ctx.globalAlpha = s.a * (0.7 + 0.3 * Math.sin(Date.now()/600 + s.x));
+    ctx.fillStyle = '#ffe8b0';
+    ctx.beginPath(); ctx.arc(s.x % W, s.y % (H*0.6), s.r, 0, Math.PI*2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawZongzi(d) {
+  ctx.save();
+  ctx.translate(d.x, d.y);
+  ctx.rotate(d.rot);
+
+  const s = d.size;
+  if (d.isBad) {
+    // "坏粽"——灰暗色调
+    ctx.fillStyle = '#6b5c40';
+    ctx.strokeStyle = '#8a7a55';
+  } else {
+    ctx.fillStyle = '#3a7d1c';
+    ctx.strokeStyle = '#2e6315';
+  }
+  ctx.lineWidth = 1.5;
+
+  // 粽叶锥形
+  ctx.beginPath();
+  ctx.moveTo(0, -s * 0.55);
+  ctx.quadraticCurveTo( s * 0.45, 0,  0,  s * 0.55);
+  ctx.quadraticCurveTo(-s * 0.45, 0,  0, -s * 0.55);
+  ctx.fill(); ctx.stroke();
+
+  // 绑绳
+  ctx.strokeStyle = d.isBad ? '#a89060' : '#c49a3c';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(-s*0.18, -s*0.12);
+  ctx.quadraticCurveTo(0, s*0.08, s*0.18, -s*0.12);
+  ctx.stroke();
+
+  // 叶子尖
+  ctx.fillStyle = d.isBad ? '#4a4230' : '#2b6510';
+  ctx.beginPath();
+  ctx.moveTo(0, -s*0.55);
+  ctx.lineTo(-s*0.1, -s*0.75);
+  ctx.lineTo(s*0.1, -s*0.75);
+  ctx.closePath(); ctx.fill();
+
+  ctx.restore();
+}
+
+function drawBasket() {
+  const bx = basket.x - basket.w/2;
+  const by = H - basket.h - 16;
+  const bw = basket.w;
+  const bh = basket.h;
+
+  // 篮身
+  const g = ctx.createLinearGradient(bx, by, bx, by+bh);
+  g.addColorStop(0, '#c8943a');
+  g.addColorStop(1, '#8a5e1e');
+  ctx.fillStyle = g;
+  roundRect(bx, by, bw, bh, 10);
+  ctx.fill();
+
+  // 篮边
+  ctx.strokeStyle = '#e8c06a';
+  ctx.lineWidth = 2;
+  roundRect(bx, by, bw, bh, 10);
+  ctx.stroke();
+
+  // 篮纹横线
+  ctx.strokeStyle = 'rgba(255,220,140,0.25)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 2; i++) {
+    const yy = by + bh * i / 3;
+    ctx.beginPath(); ctx.moveTo(bx+6, yy); ctx.lineTo(bx+bw-6, yy); ctx.stroke();
+  }
+}
+
+function roundRect(x,y,w,h,r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath();
+}
+
+/* ---------- 游戏循环 ---------- */
+function loop(ts) {
+  if (!running) return;
+  drawBG();
+
+  // 生成
+  if (!lastSpawn || ts - lastSpawn > CONFIG.dropInterval - (CONFIG.speedUpOverTime ? (30-timerVal)*15 : 0)) {
+    spawnDrop();
+    lastSpawn = ts;
+  }
+
+  // 更新 & 绘制粽子
+  for (let i = drops.length - 1; i >= 0; i--) {
+    const d = drops[i];
+    d.y += d.speed;
+    d.rot += d.rotSpd;
+    drawZongzi(d);
+
+    // 碰撞检测（篮子矩形）
+    const bx = basket.x - basket.w / 2;
+    const by = H - basket.h - 16;
+    if (!d.caught &&
+        d.x > bx + 4 && d.x < bx + basket.w - 4 &&
+        d.y + d.size * 0.4 > by && d.y - d.size * 0.4 < by + basket.h) {
+      d.caught = true;
+      if (d.isBad) {
+        score = Math.max(0, score - 1);
+        // 扣分闪红
+        flashRed();
+      } else {
+        score++;
+        popText('+1', d.x, d.y);
+      }
+      updateHUD();
+    }
+
+    // 超出屏幕移除
+    if (d.y > H + 40) drops.splice(i, 1);
+  }
+
+  // 浮动文字
+  drawPopTexts();
+  drawBasket();
+  rafId = requestAnimationFrame(loop);
+}
+
+/* 浮动 +1 */
+let popTexts = [];
+function popText(txt, x, y) {
+  popTexts.push({ txt, x, y, life: 1 });
+}
+function drawPopTexts() {
+  for (let i = popTexts.length - 1; i >= 0; i--) {
+    const p = popTexts[i];
+    p.y -= 1.2;
+    p.life -= 0.025;
+    if (p.life <= 0) { popTexts.splice(i,1); continue; }
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = '#ffe08a';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.txt, p.x, p.y);
+    ctx.globalAlpha = 1;
+  }
+}
+function flashRed() {
+  const o = document.createElement('div');
+  Object.assign(o.style, {
+    position:'absolute',inset:'0',background:'rgba(255,40,40,0.18)',
+    pointerEvents:'none',zIndex:'8'
+  });
+  wrap.appendChild(o);
+  setTimeout(()=> o.remove(), 180);
+}
+
+function updateHUD() {
+  document.getElementById('hudScore').textContent = '🎋 × ' + score;
+}
+
+/* ---------- 输入控制 ---------- */
+function getPointerX(e) {
+  if (e.touches) return e.touches[0].clientX;
+  return e.clientX;
+}
+function onPointerDown(e) { fingerX = getPointerX(e); }
+function onPointerMove(e) {
+  e.preventDefault();
+  fingerX = getPointerX(e);
+}
+function onPointerUp() { /* keep last pos */ }
+
+cv.addEventListener('touchstart', onPointerDown, {passive:false});
+cv.addEventListener('touchmove',  onPointerMove, {passive:false});
+cv.addEventListener('touchend',   onPointerUp);
+cv.addEventListener('mousedown',  e => { fingerX = e.clientX; });
+cv.addEventListener('mousemove', e => { if (e.buttons) fingerX = e.clientX; });
+
+// 逐帧把篮子朝手指位置挪（平滑跟手）
+function tickBasket() {
+  if (!running) return;
+  if (fingerX !== null) {
+    // 篮子中心平滑跟随手指
+    basket.x += (fingerX - basket.x) * 0.35;
+    basket.x = Math.max(basket.w/2, Math.min(W - basket.w/2, basket.x));
+  }
+  requestAnimationFrame(tickBasket);
+}
+
+/* ---------- 开始 / 结束 ---------- */
+function startGame() {
+  score = 0; drops = []; lastSpawn = 0; popTexts = [];
+  basket.x = W / 2; basket.w = W * CONFIG.basketWidthRatio;
+  timerVal = CONFIG.duration;
+  running = true;
+  document.getElementById('startPanel').classList.add('hidden');
+  document.getElementById('endPanel').classList.add('hidden');
+  document.getElementById('hud').style.display = '';
+  updateHUD();
+  updateTimer();
+  rafId = requestAnimationFrame(loop);
+  tickBasket();
+}
+
+function updateTimer() {
+  if (!running) return;
+  document.getElementById('hudTimer').textContent = '⏱ ' + timerVal + 's';
+  if (timerVal <= 0) { endGame(); return; }
+  timerVal--;
+  setTimeout(updateTimer, 1000);
+}
+
+function endGame() {
+  running = false; cancelAnimationFrame(rafId);
+  document.getElementById('hud').style.display = 'none';
+  document.getElementById('finalScore').textContent = score;
+  document.getElementById('submitMsg').textContent = '';
+  document.getElementById('submitMsg').className = 'submitMsg';
+  document.getElementById('endPanel').classList.remove('hidden');
+  // 自动聚焦
+  setTimeout(()=> document.getElementById('inpName').focus(), 300);
+}
+
+/* ---------- 提交成绩 ---------- */
+async function submitScore() {
+  const name = document.getElementById('inpName').value.trim();
+  const emp  = document.getElementById('inpEmp').value.trim();
+  const msgEl = document.getElementById('submitMsg');
+  if (!name) { msgEl.textContent = '⚠️ 请输入姓名'; msgEl.className = 'error'; return; }
+
+  const payload = {
+    name,
+    empNo: emp,
+    score,
+    playedAt: new Date().toISOString(),
+  };
+
+  // ---- 本地先打 log，方便你紧急兜底 ----
+  console.log('🎋 成绩:', payload);
+
+  if (!CONFIG.submitUrl) {
+    // ★ 还没配接口时，弹数据让你抄 / 复制到剪贴板
+    msgEl.innerHTML = `<span class="success">✅ 成绩已记录（本地）</span><br>
+      <code style="font-size:11px;color:#cba86e">${JSON.stringify(payload)}</code><br>
+      <small>⚠️ 你还没配 submitUrl，去控制台复制或按方案配接口</small>`;
+    return;
+  }
+
+  msgEl.textContent = '提交中…';
+  msgEl.className = '';
+  try {
+    const res = await fetch(CONFIG.submitUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      msgEl.innerHTML = '<span class="success">✅ 成绩提交成功，祝你好运 🎉</span>';
+      document.querySelector('#resultPanel .btn').style.display = 'none';
+    } else {
+      msgEl.innerHTML = `<span class="error">❌ 提交失败（${res.status}），联系HR吧～</span>`;
+    }
+  } catch(err) {
+    msgEl.innerHTML = `<span class="error">❌ 网络错误，成绩已保存在控制台，请联系IT</span>`;
+  }
+}
+</script>
+</body>
+</html>
